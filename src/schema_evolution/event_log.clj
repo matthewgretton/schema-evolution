@@ -1,6 +1,15 @@
 (ns schema-evolution.event-log
   (:require [schema-evolution.serialisation :as s]))
 
+(defn create-event-log-ref [schema]
+  (ref {:schema schema
+        :events []
+        :offset 0
+        }))
+
+(defn evolve-schema [event-log schema]
+  (assoc event-log :schema schema))
+
 (defn append-event [{:keys [:schema] :as event-log} event]
   (let [serialised-event (s/serialise schema event)]
     (update event-log :events conj serialised-event)))
@@ -10,47 +19,41 @@
     (update event-log :offset inc)
     event-log))
 
-(defn consume-last-event [{:keys [:events :schema :offset]}]
-  (if-let [bytes (get events (dec offset))]
+(defn consume [{:keys [:events :schema :offset]}]
+  (if-let [bytes (get events offset)]
     (s/deserialise schema bytes)))
 
-(defn publish! [event-log-atom event]
-  (swap! event-log-atom append-event event)
+
+(defn evolve-schema! [event-log-ref schema]
+  (dosync (alter event-log-ref evolve-schema)))
+
+
+(defn publish! [event-log-ref event]
+  (dosync (alter event-log-ref append-event event))
   nil)
 
-(defn consume! [event-log-atom]
-  (let [new-event-log (swap! event-log-atom inc-offset)]
-    (consume-last-event new-event-log)))
+(defn consume! [event-log-ref]
+  (dosync (if-let [event (consume @event-log-ref)]
+            (do (alter event-log-ref inc-offset)
+                event))))
 
 
-
-(def user-schema-map
+(def example-schema
   {
    "namespace" "example.avro"
    "type"      "record"
-   "name"      "User"
+   "name"      "Example"
    "fields"    [
                 {
                  "name" "a"
                  "type" "string"
                  }
-                {
-                 "name"    "b"
-                 "type"    ["null" "int"]
-                 "default" nil
-                 }
                 ]
    })
 
-(def user-event-log-atom (atom {:schema user-schema-map
-                                :events []
-                                :offset 0
-                                }))
+(def event-log-ref (create-event-log-ref example-schema))
 
 
+(publish! event-log-ref {"a" "Bob" "b" (int 0)})
 
-
-
-(publish! user-event-log-atom  {"a" "Bob" "b" (int 0)})
-
-(consume! user-event-log-atom)
+(consume! event-log-ref)
