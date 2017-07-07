@@ -1,59 +1,80 @@
 (ns schema-evolution.event-log
-  (:require [schema-evolution.serialisation :as s]))
+  (:require [schema-evolution.avro :as avro]
+            [schema-evolution.schema :as schema]))
 
-(defn create-event-log-ref [schema]
-  (ref {:schema schema
-        :events []
-        :offset 0
-        }))
+(defn publish [serialised-events writer-schema event]
+  {:pre [(not-any? nil? [serialised-events writer-schema event])]}
+  (let [parsed-schema (avro/parse-schema writer-schema)
+        serialised-event {:event/bytes               (avro/serialise parsed-schema event)
+                          :event/writer-schema-bytes (avro/serialise schema/event-schema-schema writer-schema)}]
+    (conj serialised-events serialised-event)))
 
-(defn evolve-schema [event-log schema]
-  (assoc event-log :schema schema))
-
-(defn append-event [{:keys [:schema] :as event-log} event]
-  (let [serialised-event (s/serialise schema event)]
-    (update event-log :events conj serialised-event)))
-
-(defn inc-offset [{:keys [:events :offset] :as event-log}]
-  (if (< offset (count events))
-    (update event-log :offset inc)
-    event-log))
-
-(defn consume [{:keys [:events :schema :offset]}]
-  (if-let [bytes (get events offset)]
-    (s/deserialise schema bytes)))
+(defn consume [serialised-events reader-schema offset]
+  (when-let [{:keys [:event/bytes :event/writer-schema-bytes]} (get serialised-events offset)]
+    (let [writer-schema (avro/parse-schema (avro/deserialise schema/event-schema-schema writer-schema-bytes))
+          reader-schema (avro/parse-schema reader-schema)
+          derserialised-event (avro/deserialise writer-schema reader-schema bytes)]
+      derserialised-event)))
 
 
-(defn evolve-schema! [event-log-ref schema]
-  (dosync (alter event-log-ref evolve-schema)))
+;; mutating versions
+(defn publish! [event-log-atom schema event]
+  (swap! event-log-atom publish schema event))
+
+(defn consume! [event-log-atom offset-ref reader-schema]
+  (dosync (let [off-set @offset-ref]
+            (if-let [event (consume @event-log-atom reader-schema off-set)]
+              [event (commute offset-ref inc)]
+              [event off-set]))))
+
+;;;;;;;;;;;;;
+;; Example ;;
+;;;;;;;;;;;;;
+
+(def event-log-atom (atom []))
+
+(def example-event-schema {
+                           :namespace "example.avro"
+                           :type      "record"
+                           :name      "Example"
+                           :fields    [
+                                       {
+                                        :name "a"
+                                        :type "string"
+                                        }
+                                       ]
+                           })
+
+(def example-event {:a "Bob"})
+
+(publish! event-log-atom example-event-schema example-event)
 
 
-(defn publish! [event-log-ref event]
-  (dosync (alter event-log-ref append-event event))
-  nil)
+(def example-schema-v2 {
+                        :namespace "example.avro"
+                        :type      "record"
+                        :name      "Example"
+                        :fields    [
+                                    {
+                                     :name "a"
+                                     :type "string"
+                                     }
 
-(defn consume! [event-log-ref]
-  (dosync (if-let [event (consume @event-log-ref)]
-            (do (alter event-log-ref inc-offset)
-                event))))
+                                    {
+                                     :name    "b"
+                                     :type    ["null" "string"]
+                                     :default nil
+                                     }
+                                    ]
+                        })
 
+(def offset-ref (ref 0))
 
-(def example-schema
-  {
-   "namespace" "example.avro"
-   "type"      "record"
-   "name"      "Example"
-   "fields"    [
-                {
-                 "name" "a"
-                 "type" "string"
-                 }
-                ]
-   })
-
-(def event-log-ref (create-event-log-ref example-schema))
+(consume! event-log-atom offset-ref example-schema-v2)
 
 
-(publish! event-log-ref {"a" "Bob" "b" (int 0)})
 
-(consume! event-log-ref)
+
+
+
+
